@@ -19,10 +19,16 @@ build-and-push:
 
     # Pretty print the JWT token (header and payload)
     - echo "=== JWT Header ==="
-    - echo "$ID_TOKEN" | cut -d'.' -f1 | base64 -d 2>/dev/null | jq .
+    - |
+      HEADER=$(echo "$ID_TOKEN" | cut -d'.' -f1 | tr '_-' '/+')
+      HEADER_PADDED="${HEADER}$(printf '%*s' $((4 - ${#HEADER} % 4)) '' | tr ' ' '=')"
+      echo "$HEADER_PADDED" | base64 -d | jq .
     - echo ""
     - echo "=== JWT Payload ==="
-    - echo "$ID_TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq .
+    - |
+      PAYLOAD=$(echo "$ID_TOKEN" | cut -d'.' -f2 | tr '_-' '/+')
+      PAYLOAD_PADDED="${PAYLOAD}$(printf '%*s' $((4 - ${#PAYLOAD} % 4)) '' | tr ' ' '=')"
+      echo "$PAYLOAD_PADDED" | base64 -d | jq .
 
     # Login to registry using JWT token
     - echo "$ID_TOKEN" | docker login -u not-relevant --password-stdin macfly4200.8gears.ch
