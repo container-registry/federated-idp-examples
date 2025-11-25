@@ -18,6 +18,8 @@ Examples demonstrating how to use Harbor/8gears Container Registry with Workload
 - GitHub Actions
 - GitLab CI
 - Kubernetes 1.33 (via Service Account tokens)
+- FluxCD
+- Forgejo Actions (TBD)
 
 ---
 
@@ -178,12 +180,139 @@ Here's an example of what a GitHub Actions OIDC token looks like:
 
 ---
 
+## GitLab CI Example
+
+This example demonstrates how to authenticate to Harbor from a GitLab CI pipeline using OIDC tokens.
+
+### Prerequisites
+
+1. **Harbor Setup**: Configure a Federated Identity Provider in Harbor:
+   - OpenID Configuration URL: `https://gitlab.com/.well-known/openid-configuration`
+   - JWKS URI: `https://gitlab.com/oauth/discovery/keys`
+   - Issuer: `https://gitlab.com`
+
+2. **Robot Account**: Create a federated robot account in Harbor with claim rules matching your GitLab project:
+   - `iss`: `https://gitlab.com`
+   - `aud`: `<your-registry-domain>` (e.g., `macfly4200.8gears.ch`)
+   - `project_path`: `<namespace>/<project>` (e.g., `8gears/container-registry/harbor-workload-identity-federation`)
+
+### Pipeline Configuration
+
+```yaml
+stages:
+  - build
+
+build-and-push:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  id_tokens:
+    ID_TOKEN:
+      aud: <your-registry-domain>  # 👈 audience claim matching your registry
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - echo "Using GitLab OIDC token"
+
+    # Login to registry using JWT token
+    - echo "$ID_TOKEN" | docker login -u not-relevant --password-stdin <your-registry-domain>
+
+    # Build image
+    - docker build -t <your-registry-domain>/library/image:$CI_COMMIT_SHA .
+
+    # Pull image from registry
+    - docker pull <your-registry-domain>/library/hello-world:latest
+  rules:
+    - when: manual  # 👈 trigger manually, or use other rules
+```
+
+### Key Points
+
+1. **id_tokens**: GitLab CI uses the `id_tokens` keyword to request OIDC tokens. The token is automatically available as `$ID_TOKEN`.
+
+2. **Audience**: The `aud` field under `id_tokens` must match the audience configured in your Harbor Federated Identity Provider.
+
+3. **Username**: The username for `docker login` is not used for authentication (can be any value like `not-relevant`). Authentication is based solely on the JWT token.
+
+4. **Token Claims**: GitLab CI OIDC tokens include claims such as:
+   - `iss`: Issuer (always `https://gitlab.com` for gitlab.com)
+   - `aud`: Audience (your registry domain)
+   - `sub`: Subject (e.g., `project_path:8gears/container-registry/harbor-workload-identity-federation:ref_type:branch:ref:main`)
+   - `project_path`: Full project path
+   - `namespace_path`: Group/namespace path
+   - `ref`: Git reference
+   - `user_login`: User who triggered the pipeline
+
+### Example JWT Token
+
+Here's an example of what a GitLab CI OIDC token looks like:
+
+**JWT Header:**
+```json
+{
+  "kid": "4i3sFE7sxqNPOT7FdvcGA1ZVGGI_r-tsDXnEuYT4ZqE",
+  "typ": "JWT",
+  "alg": "RS256"
+}
+```
+
+**JWT Payload:**
+```json
+{
+  "project_id": "76366029",
+  "project_path": "8gears/container-registry/harbor-workload-identity-federation",
+  "namespace_id": "1087575",
+  "namespace_path": "8gears/container-registry",
+  "user_id": "907142",
+  "user_login": "vad1mo",
+  "user_email": "bauer.vadim@gmail.com",
+  "user_access_level": "owner",
+  "pipeline_id": "2179265456",
+  "pipeline_source": "push",
+  "job_id": "12217223061",
+  "ref": "main",
+  "ref_type": "branch",
+  "ref_path": "refs/heads/main",
+  "ref_protected": "true",
+  "runner_id": 47561171,
+  "runner_environment": "self-hosted",
+  "sha": "de7a8b6e3892321ac9d2305f26332dcdc775f1c2",
+  "project_visibility": "public",
+  "ci_config_ref_uri": "gitlab.com/8gears/container-registry/harbor-workload-identity-federation//.gitlab-ci.yml@refs/heads/main",
+  "ci_config_sha": "de7a8b6e3892321ac9d2305f26332dcdc775f1c2",
+  "jti": "aeb1491b-8988-49b5-ada0-2e372973b18e",
+  "iat": 1764098080,
+  "nbf": 1764098075,
+  "exp": 1764101680,
+  "iss": "https://gitlab.com",
+  "sub": "project_path:8gears/container-registry/harbor-workload-identity-federation:ref_type:branch:ref:main",
+  "aud": "macfly4200.8gears.ch"
+}
+```
+
+**Key claims for Harbor claim rules:**
+| Claim | Description | Example Value |
+|-------|-------------|---------------|
+| `iss` | Token issuer | `https://gitlab.com` |
+| `aud` | Target audience (your registry) | `macfly4200.8gears.ch` |
+| `sub` | Subject identifier | `project_path:8gears/container-registry/harbor-workload-identity-federation:ref_type:branch:ref:main` |
+| `project_path` | Full project path | `8gears/container-registry/harbor-workload-identity-federation` |
+| `namespace_path` | Group/namespace path | `8gears/container-registry` |
+| `ref` | Git reference | `main` |
+| `user_login` | User who triggered the pipeline | `vad1mo` |
+
+---
+
 ## How It Works
 
-1. **Token Request**: GitHub Actions provides environment variables (`ACTIONS_ID_TOKEN_REQUEST_TOKEN` and `ACTIONS_ID_TOKEN_REQUEST_URL`) to request OIDC tokens.
+1. **Token Request**: The CI/CD platform (GitHub Actions, GitLab CI) provides an OIDC token to the job. GitHub uses environment variables and a curl request, while GitLab provides the token directly via `id_tokens`.
 
 2. **Token Validation**: Harbor validates the JWT by:
-   - Verifying the signature using GitHub's JWKS
+   - Verifying the signature using the provider's JWKS
    - Checking the `iss` (issuer) claim matches the configured provider
    - Validating `exp` (expiration) and `aud` (audience) claims
 
@@ -196,11 +325,16 @@ Here's an example of what a GitHub Actions OIDC token looks like:
 ## Security Considerations
 
 - Tokens are short-lived (typically 5-10 minutes)
-- Each workflow run gets a unique token
+- Each pipeline/workflow run gets a unique token
 - Claims provide fine-grained control over which workflows can access which resources
-- No secrets need to be stored in GitHub repository settings
+- No secrets need to be stored in CI/CD settings
 
 ## References
 
+### GitHub Actions
 - [GitHub OIDC Documentation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
 - [GitHub OIDC Token Claims](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#understanding-the-oidc-token)
+
+### GitLab CI
+- [GitLab OIDC Documentation](https://docs.gitlab.com/ci/yaml/#id_tokens)
+- [GitLab OIDC Token Claims](https://docs.gitlab.com/ci/secrets/id_token_authentication.html)
