@@ -32,6 +32,8 @@ This example demonstrates how to authenticate to Harbor from a GitHub Actions wo
    - JWKS URI: `https://token.actions.githubusercontent.com/.well-known/jwks`
    - Issuer: `https://token.actions.githubusercontent.com`
 
+   ![Harbor Federated IDP Setup](images/harbor-federated-idp-setup.png)
+
 2. **Robot Account**: Create a federated robot account in Harbor with claim rules matching your GitHub repository:
    - `iss`: `https://token.actions.githubusercontent.com`
    - `aud`: `<your-registry-domain>` (e.g., `macfly4200.8gears.ch`) — The audience can be any string, but using your registry domain is recommended. This ensures tokens are scoped specifically to your registry and prevents token reuse across different services.
