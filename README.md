@@ -41,6 +41,8 @@ This example demonstrates how to authenticate to Harbor from a GitHub Actions wo
 
 ### Workflow Configuration
 
+See a [successful run example](https://github.com/container-registry/federated-idp-examples/actions/runs/19678450809).
+
 ```yaml
 name: Create Image and Push Using federated IDP
 
