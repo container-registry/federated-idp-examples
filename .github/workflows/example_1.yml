@@ -17,26 +17,12 @@ jobs:
       - name: Get OIDC token
         id: oidc
         run: |
-          #echo "Requesting OIDC token"
-          #RESPONSE=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          #"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=my-registry")
-          #
-          #echo "Full response: $RESPONSE"
-          #echo "Sending response to webhook..."
-          #curl -X POST ${{ secrets.WEBHOOK_URL }} \
-          #  -H "Content-Type: application/json" \
-          #  -d "{\"response\": \"${RESPONSE}\"}"
-          #
-          #TOKEN=$(echo "$RESPONSE" | jq -r '.value')
-          #
-          #echo "Sending token to webhook..."
-          #curl -X POST ${{ secrets.WEBHOOK_URL }} \
-          #  -H "Content-Type: application/json" \
-          #  -d "{\"token\": \"${TOKEN}\"}"
-          #
-          ## echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-          ## echo "token=$TOKEN" >> "$GITHUB_SUMMARY"
-          #echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "Requesting OIDC token"
+          RESPONSE=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=my-registry")
+
+          TOKEN=$(echo "$RESPONSE" | jq -r '.value')
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
           # Pretty print the JWT token (header and payload)
           echo "=== JWT Header ==="
