@@ -1,0 +1,36 @@
+stages:
+  - build
+
+build-and-push:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  id_tokens:
+    ID_TOKEN:
+      aud: macfly4200.8gears.ch  # 👈 audience claim matching your registry
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - echo "Using GitLab OIDC token"
+
+    # Pretty print the JWT token (header and payload)
+    - echo "=== JWT Header ==="
+    - echo "$ID_TOKEN" | cut -d'.' -f1 | base64 -d 2>/dev/null | jq .
+    - echo ""
+    - echo "=== JWT Payload ==="
+    - echo "$ID_TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq .
+
+    # Login to registry using JWT token
+    - echo "$ID_TOKEN" | docker login -u not-relevant --password-stdin macfly4200.8gears.ch
+
+    # Build image
+    - docker build -t macfly4200.8gears.ch/library/image:$CI_COMMIT_SHA .
+
+    # Pull image from registry
+    - docker pull macfly4200.8gears.ch/library/hello-world:latest
+  rules:
+    - when: manual
