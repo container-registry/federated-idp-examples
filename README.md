@@ -17,7 +17,7 @@ Repository with examples demonstrating how to use Harbor/8gears Container Regist
 
 - GitHub Actions
 - GitLab CI
-- Kubernetes 1.33 (via Service Account tokens)
+- Kubernetes 1.34+ (via Service Account tokens)
 - FluxCD
 - Forgejo Actions (TBD)
 
@@ -318,7 +318,38 @@ Here's an example of what a GitLab CI OIDC token looks like:
 
 ## Kubernetes (k3s/k3d) Setup
 
-This section describes how to set up a local k3s/k3d cluster with Kubernetes Image Credential Provider to pull images using Service Account tokens (Workload Identity Federation).
+This section describes how to set up a local k3s/k3d cluster with Kubernetes Image Credential Provider (KEP-4412) to pull images using Service Account tokens (Workload Identity Federation).
+
+### How It Works
+
+In Kubernetes 1.34+, the kubelet can automatically request Service Account tokens with custom audiences for image credential providers. This eliminates the need for static image pull secrets:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              k3d Cluster                                     │
+│  ┌─────────────────┐    ┌──────────────────┐    ┌───────────────────────┐   │
+│  │   Pod (httpd)   │    │     Kubelet      │    │  Credential Provider  │   │
+│  │                 │───▶│                  │───▶│  Plugin               │   │
+│  │ Uses SA: default│    │ Requests SA token│    │ Returns Basic Auth    │   │
+│  └─────────────────┘    │ with audience    │    │ (jwt:<SA token>)      │   │
+│                         └──────────────────┘    └───────────────────────┘   │
+│                                  │                                           │
+│                                  ▼                                           │
+│                         ┌──────────────────┐                                │
+│                         │    containerd    │                                │
+│                         │ (pulls image)    │                                │
+│                         └────────┬─────────┘                                │
+└──────────────────────────────────┼──────────────────────────────────────────┘
+                                   │ Basic Auth: jwt:<k8s-sa-token>
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Harbor Registry                                      │
+│  ┌──────────────────┐    ┌─────────────────────────────────────────────┐   │
+│  │ robotjwt         │───▶│ Validates K8s JWT signature via JWKS        │   │
+│  │ middleware       │    │ Maps claims to robot account permissions    │   │
+│  └──────────────────┘    └─────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Prerequisites
 
@@ -327,9 +358,33 @@ This section describes how to set up a local k3s/k3d cluster with Kubernetes Ima
 - kubectl installed
 - The `credential-provider-plugin` binary for your architecture (linux-amd64 or linux-arm64)
 
-### 1. Create k3d Configuration
+### Quick Start
 
-Create `k3d-config.yaml`:
+```bash
+# 1. Create the cluster
+k3d cluster create --config k3d-config.yaml
+
+# 2. Get kubeconfig
+k3d kubeconfig get credential-provider-test > kubeconfig.yaml
+export KUBECONFIG=kubeconfig.yaml
+
+# 3. Apply RBAC for audience token requests
+kubectl apply -f rbac-audience.yaml
+
+# 4. Get JWKS for Harbor configuration
+kubectl get --raw /openid/v1/jwks | jq .
+
+# 5. Configure Harbor Federated IDP with the JWKS
+# 6. Create robot account with claim rules
+
+# 7. Deploy test pod
+kubectl apply -f pod-example.yaml
+kubectl get pod httpd -w
+```
+
+### Configuration Files
+
+#### k3d-config.yaml
 
 ```yaml
 apiVersion: k3d.io/v1alpha5
@@ -340,11 +395,11 @@ servers: 1
 agents: 0
 image: rancher/k3s:v1.34.2-k3s1
 volumes:
-  # Mount the credential provider binary
-  - volume: /path/to/linux-arm64/credential-provider-plugin:/var/lib/rancher/credentialprovider/bin/credential-provider-plugin
+  # Mount the credential provider binary to k3s default path
+  - volume: /path/to/linux-arm64/credential-provider-plugin:/var/lib/rancher/credentialprovider/bin/credential-provider-echo-token-silly
     nodeFilters:
       - all
-  # Mount the credential provider config
+  # Mount the credential provider config to k3s default path
   - volume: /path/to/k8s_credential_provider_config.yaml:/var/lib/rancher/credentialprovider/config.yaml
     nodeFilters:
       - all
@@ -358,24 +413,15 @@ options:
       - arg: --kube-apiserver-arg=api-audiences=https://kubernetes.default.svc.cluster.local,<your-registry-domain>
         nodeFilters:
           - server:*
-      # Enable feature gates for credential providers with SA tokens
-      - arg: --kube-apiserver-arg=feature-gates=ServiceAccountNodeAudienceRestriction=true
-        nodeFilters:
-          - server:*
-      - arg: --kubelet-arg=feature-gates=KubeletServiceAccountTokenForCredentialProviders=true
-        nodeFilters:
-          - server:*
 ```
 
-### 2. Create Credential Provider Configuration
-
-Create `k8s_credential_provider_config.yaml`:
+#### k8s_credential_provider_config.yaml
 
 ```yaml
 kind: CredentialProviderConfig
 apiVersion: kubelet.config.k8s.io/v1
 providers:
-  - name: credential-provider-plugin
+  - name: credential-provider-echo-token-silly
     apiVersion: credentialprovider.kubelet.k8s.io/v1
     tokenAttributes:
       requireServiceAccount: true
@@ -386,114 +432,133 @@ providers:
     defaultCacheDuration: "1h"
 ```
 
-### 3. Create the Cluster
+#### rbac-audience.yaml
 
-```bash
-# Create the cluster
-k3d cluster create --config k3d-config.yaml
+This RBAC configuration authorizes kubelets to request tokens with your registry's audience. Required by the `ServiceAccountNodeAudienceRestriction` feature gate (enabled by default in Kubernetes 1.34+).
 
-# Get kubeconfig
-k3d kubeconfig get credential-provider-test > kubeconfig.yaml
-export KUBECONFIG=kubeconfig.yaml
+```yaml
+# ClusterRole that allows requesting SA tokens with the harbor audience
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-harbor-audience-token
+rules:
+  - verbs: ["request-serviceaccounts-token-audience"]
+    apiGroups: [""]
+    resources: ["<your-registry-domain>"]
+---
+# Bind to system:nodes group so all kubelets can use it
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-harbor-audience-token
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-harbor-audience-token
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:nodes
 ```
 
-### 4. Export JWKS for Harbor
+#### pod-example.yaml
 
-Export the cluster's JWKS keys for configuring Harbor's Federated IDP:
+With KEP-4412, pods don't need projected volumes. The kubelet handles token generation automatically:
 
-```bash
-# Get the OIDC discovery document
-kubectl get --raw /.well-known/openid-configuration | jq .
-
-# Get the JWKS keys
-kubectl get --raw /openid/v1/jwks | jq . > jwks.json
-```
-
-### 5. Configure Harbor Federated IDP
-
-1. In Harbor, go to **Administration** → **Robot Accounts** → **Federated Identity Providers**
-2. Create a new Federated IDP with:
-   - **Issuer**: `https://kubernetes.default.svc.cluster.local`
-   - **JWKS**: Paste the contents of `jwks.json`
-3. Create a robot account with claim rules:
-   - `iss == https://kubernetes.default.svc.cluster.local`
-   - `aud == <your-registry-domain>`
-   - `kubernetes.io.namespace == <namespace>` (optional, for namespace-scoped access)
-
-### 6. Create Service Account and Test Pod
-
-```bash
-# Create a service account
-kubectl create serviceaccount test-pull
-
-# Create a test pod with projected volume for the audience
-kubectl apply -f - <<EOF
+```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: test-harbor
+  name: httpd
   namespace: default
 spec:
-  serviceAccountName: test-pull
+  serviceAccountName: default
   containers:
-  - name: test-harbor
-    image: <your-registry-domain>/library/hello-world:latest
-    volumeMounts:
-    - name: harbor-token
-      mountPath: /var/run/secrets/harbor
-      readOnly: true
-  volumes:
-  - name: harbor-token
-    projected:
-      sources:
-      - serviceAccountToken:
-          audience: <your-registry-domain>
-          expirationSeconds: 3600
-          path: token
-EOF
+  - name: httpd
+    image: <your-registry-domain>/library/httpd
+    imagePullPolicy: Always
 ```
 
-### Key Points
+### Harbor Configuration
 
-1. **Feature Gates**: Both `ServiceAccountNodeAudienceRestriction` (API server) and `KubeletServiceAccountTokenForCredentialProviders` (kubelet) must be enabled.
+1. **Export JWKS from cluster:**
+   ```bash
+   kubectl get --raw /openid/v1/jwks | jq .
+   ```
 
-2. **Projected Volume**: The pod MUST have a projected volume with the audience matching your registry. Without this, kubelet cannot request tokens for that audience.
+2. **Create Federated IDP in Harbor:**
+   - Issuer: `https://kubernetes.default.svc.cluster.local`
+   - Audience: `<your-registry-domain>`
+   - JWKS: Paste the JSON output
 
-3. **Credential Provider Plugin**: The `credential-provider-plugin` binary receives the SA token from kubelet and returns it as credentials for the registry.
-
-4. **JWKS Rotation**: If you recreate the cluster, new signing keys are generated. You must update Harbor's Federated IDP with the new JWKS.
+3. **Create Robot Account with claim rules:**
+   - `sub` equals `system:serviceaccount:default:default` (specific SA)
+   - Or `sub` matches `system:serviceaccount:*:*` (any SA)
+   - Grant pull permission on target repository
 
 ### Example JWT Token
-
-A Kubernetes Service Account token for image pulls looks like:
 
 ```json
 {
   "aud": ["macfly4200.8gears.ch"],
-  "exp": 1764255017,
-  "iat": 1764251417,
+  "exp": 1764290604,
+  "iat": 1764287004,
   "iss": "https://kubernetes.default.svc.cluster.local",
-  "jti": "5e8572b6-4e27-4039-8fc5-dcdd85ade4e1",
+  "jti": "a8c1d9f4-ded3-42b8-9377-402f6cc34f5e",
   "kubernetes.io": {
     "namespace": "default",
+    "node": {
+      "name": "k3d-credential-provider-test-server-0",
+      "uid": "c922a6dd-d8af-4877-8a09-922898d7ddb5"
+    },
+    "pod": {
+      "name": "httpd",
+      "uid": "375b30f1-ef29-4477-b46a-aa80607b6cfc"
+    },
     "serviceaccount": {
-      "name": "test-pull",
-      "uid": "238dbbbe-4d7c-4efe-bd03-957c547c8daa"
+      "name": "default",
+      "uid": "c871d5a5-d81d-4ce7-8c4b-2dd62dbde226"
     }
   },
-  "nbf": 1764251417,
-  "sub": "system:serviceaccount:default:test-pull"
+  "nbf": 1764287004,
+  "sub": "system:serviceaccount:default:default"
 }
 ```
 
-**Key claims for Harbor claim rules:**
+**Key claims for Harbor robot account rules:**
+
 | Claim | Description | Example Value |
 |-------|-------------|---------------|
 | `iss` | Token issuer | `https://kubernetes.default.svc.cluster.local` |
-| `aud` | Target audience (your registry) | `macfly4200.8gears.ch` |
-| `sub` | Subject identifier | `system:serviceaccount:default:test-pull` |
+| `aud` | Target audience | `macfly4200.8gears.ch` |
+| `sub` | Subject identifier | `system:serviceaccount:default:default` |
 | `kubernetes.io.namespace` | Kubernetes namespace | `default` |
-| `kubernetes.io.serviceaccount.name` | Service account name | `test-pull` |
+| `kubernetes.io.serviceaccount.name` | Service account name | `default` |
+| `kubernetes.io.pod.name` | Pod requesting the image | `httpd` |
+
+### Key Points
+
+1. **No Projected Volumes Required**: KEP-4412 handles token generation automatically. Pods don't need projected volumes.
+
+2. **RBAC for Audiences**: The `request-serviceaccounts-token-audience` verb authorizes which audiences kubelets can request tokens for.
+
+3. **JWKS Rotation**: Recreating the cluster generates new signing keys. Update Harbor's Federated IDP with the new JWKS.
+
+4. **Kubernetes 1.33**: Must explicitly enable feature gates `ServiceAccountNodeAudienceRestriction` and `KubeletServiceAccountTokenForCredentialProviders`.
+
+### Troubleshooting
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `audience not found in pod spec volume` | Missing RBAC for audience | Apply `rbac-audience.yaml` |
+| `no robots matched your token` | No robot with matching claims | Create robot with `sub` claim rule |
+| `401 Unauthorized` | JWKS mismatch or wrong audience | Verify JWKS and audience in Harbor |
+
+### References
+
+- [KEP-4412: Service Account Tokens for Image Credential Providers](https://github.com/kubernetes/enhancements/tree/master/keps/sig-auth/4412-projected-service-account-tokens-for-kubelet-image-credential-providers)
+- [Kubernetes v1.34 Release Notes](https://kubernetes.io/blog/2025/08/27/kubernetes-v1-34-release/)
 
 ---
 

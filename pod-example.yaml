@@ -1,22 +1,11 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: test-harbor
+  name: httpd
   namespace: default
 spec:
-  serviceAccountName: test-pull
+  serviceAccountName: default
   containers:
-  - name: test-harbor
-    image: macfly4200.8gears.ch/library/hello-world:latest
-    volumeMounts:
-    - name: harbor-token
-      mountPath: /var/run/secrets/harbor
-      readOnly: true
-  volumes:
-  - name: harbor-token
-    projected:
-      sources:
-      - serviceAccountToken:
-          audience: macfly4200.8gears.ch
-          expirationSeconds: 3600
-          path: token
+  - name: httpd
+    image: macfly4200.8gears.ch/library/httpd
+    imagePullPolicy: Always
